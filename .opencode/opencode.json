@@ -39,6 +39,24 @@
       "params": [],
       "command": ["python3", "-c",
         "import sys; sys.path.insert(0,'/Users/jeremy/dev/stealth-memory'); from stealth_memory.training_decider import decider; import json; print(json.dumps(decider.get_stats(), indent=2))"]
+    },
+    {
+      "name": "lora-export-data",
+      "description": "Exportiert Trainingsdaten aus dem Gedaechtnis fuer LoRA-Feinabstimmung.",
+      "params": [],
+      "command": ["python3", "-c",
+        "import sys; sys.path.insert(0,'/Users/jeremy/dev/stealth-lora'); from stealth_lora.trainer_sota import FireworksTrainerSOTA; t=FireworksTrainerSOTA(); r=t.export_training_data(); print(f'exported {r}')"]
+    },
+    {
+      "name": "lora-deploy-adapter",
+      "description": "Registriert einen neuen Adapter und aktiviert ihn.",
+      "params": [
+        {"name": "--adapter-id", "type": "string", "required": true},
+        {"name": "--capability", "type": "string", "required": true}
+      ],
+      "command": ["python3", "-c",
+        "import sys; sys.path.insert(0,'/Users/jeremy/dev/stealth-lora'); from stealth_lora.adapter_registry import AdapterRegistry; r=AdapterRegistry(); r.register(sys.argv[1], sys.argv[2]); print(f'adapter {sys.argv[1]} deployed')",
+        "{--adapter-id}", "{--capability}"]
     }
   ]
 }
