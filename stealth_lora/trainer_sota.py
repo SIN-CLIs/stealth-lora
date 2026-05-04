@@ -3,7 +3,8 @@ from pathlib import Path
 from typing import Optional
 import httpx
 
-FIREWORKS_API_KEY = os.environ.get("FIREWORKS_API_KEY", "")
+from ..key_rotator.manager import KeyPoolManager
+
 FW_API_BASE = "https://api.fireworks.ai"
 FW_INFERENCE_BASE = "https://api.fireworks.ai/inference/v1"
 BASE_MODEL = "accounts/fireworks/models/minimax-m2p7"
@@ -14,15 +15,33 @@ logger = logging.getLogger("stealth_lora.sota")
 
 class FireworksTrainerSOTA:
     def __init__(self, base_model: str = BASE_MODEL):
-        if not FIREWORKS_API_KEY:
-            raise RuntimeError("FIREWORKS_API_KEY nicht gesetzt")
         self.base_model = base_model
-        self.api_key = FIREWORKS_API_KEY
+        self.pool = KeyPoolManager()
         self.account_id = self._discover_account_id()
-        self.headers = {"Authorization": f"Bearer {FIREWORKS_API_KEY}", "Content-Type": "application/json"}
+
+    def _key(self) -> str:
+        key = self.pool.get_active_key()
+        if not key:
+            raise RuntimeError("Kein API-Key im Pool verfügbar")
+        return key
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._key()}", "Content-Type": "application/json"}
+
+    def _http(self, method: str, url: str, **kwargs) -> httpx.Response:
+        key = self._key()
+        with httpx.Client(timeout=60) as client:
+            r = client.request(method, url, headers={"Authorization": f"Bearer {key}"}, **kwargs)
+        if r.status_code == 429:
+            self.pool.report_failure(key)
+            logger.warning(f"Rate-Limit auf Key {key[:12]}... Rotating...")
+            self.pool.rotate()
+            return self._http(method, url, **kwargs)
+        return r
 
     def _discover_account_id(self) -> str:
-        r = httpx.get(f"{FW_API_BASE}/v1/accounts", headers={"Authorization": f"Bearer {FIREWORKS_API_KEY}"}, timeout=15)
+        r = httpx.get(f"{FW_API_BASE}/v1/accounts",
+                      headers={"Authorization": f"Bearer {self._key()}"}, timeout=15)
         r.raise_for_status()
         accounts = r.json().get("accounts", [])
         if not accounts:
@@ -38,7 +57,7 @@ class FireworksTrainerSOTA:
     def create_dataset(self, dataset_id: str, example_count: int) -> bool:
         url = self._account_url("datasets")
         payload = {"datasetId": dataset_id, "dataset": {"userUploaded": {}, "exampleCount": str(example_count)}}
-        r = httpx.post(url, headers=self.headers, json=payload, timeout=30)
+        r = self._http("POST", url, json=payload)
         if r.status_code not in (200, 201):
             logger.error(f"Dataset-Erstellung fehlgeschlagen: {r.text}")
             return False
@@ -49,13 +68,19 @@ class FireworksTrainerSOTA:
         url = self._account_url(f"datasets/{dataset_id}:upload")
         for attempt in range(3):
             try:
+                key = self._key()
                 with open(dataset_path, "rb") as f:
-                    r = httpx.post(url, headers={"Authorization": f"Bearer {FIREWORKS_API_KEY}"},
+                    r = httpx.post(url, headers={"Authorization": f"Bearer {key}"},
                                    files={"file": (dataset_path.name, f, "application/jsonl")}, timeout=120)
+                if r.status_code == 429:
+                    self.pool.report_failure(key)
+                    self.pool.rotate()
+                    time.sleep(5)
+                    continue
                 if r.status_code in (200, 201):
                     logger.info(f"Upload OK: {dataset_path.name}")
                     return True
-                logger.warning(f"Upload attempt {attempt+1}/3 fehlgeschlagen ({r.status_code}): {r.text[:200]}")
+                logger.warning(f"Upload attempt {attempt+1}/3 ({r.status_code}): {r.text[:200]}")
                 time.sleep(5)
             except Exception as e:
                 logger.warning(f"Upload attempt {attempt+1}/3 Exception: {e}")
@@ -64,26 +89,18 @@ class FireworksTrainerSOTA:
 
     def validate_dataset(self, dataset_id: str) -> bool:
         url = self._account_url(f"datasets/{dataset_id}:validateUpload")
-        r = httpx.post(url, headers={"Authorization": f"Bearer {FIREWORKS_API_KEY}"}, timeout=30)
-        if r.status_code not in (200, 201):
-            logger.warning(f"Validation returned {r.status_code}: {r.text[:200]}")
+        r = self._http("POST", url)
         return r.status_code in (200, 201)
 
     def create_ft_job(self, dataset_id: str) -> Optional[str]:
         output_id = f"sin-daemon-lora-{int(time.time())}"
         url = self._account_url("supervisedFineTuningJobs")
         payload = {
-            "displayName": output_id,
-            "baseModel": self.base_model,
-            "dataset": dataset_id,
-            "outputModel": output_id,
-            "epochs": 2,
-            "learningRate": 5e-5,
-            "loraRank": 16,
-            "batchSize": 16,
-            "gradientAccumulationSteps": 4,
+            "displayName": output_id, "baseModel": self.base_model, "dataset": dataset_id,
+            "outputModel": output_id, "epochs": 2, "learningRate": 5e-5,
+            "loraRank": 16, "batchSize": 16, "gradientAccumulationSteps": 4,
         }
-        r = httpx.post(url, headers=self.headers, json=payload, timeout=30)
+        r = self._http("POST", url, json=payload)
         if r.status_code not in (200, 201):
             logger.error(f"Job-Erstellung fehlgeschlagen: {r.text}")
             return None
@@ -97,8 +114,7 @@ class FireworksTrainerSOTA:
         end = time.time() + max_seconds
         while time.time() < end:
             try:
-                r = httpx.get(url, headers={"Authorization": f"Bearer {FIREWORKS_API_KEY}"}, timeout=30)
-                r.raise_for_status()
+                r = self._http("GET", url)
                 status = r.json()
                 state = status.get("state", "STATE_UNSPECIFIED")
                 if state == "JOB_STATE_COMPLETED":
@@ -123,10 +139,11 @@ class FireworksTrainerSOTA:
         hits = 0
         for prompt in prompts:
             try:
-                r = httpx.post(url, headers={"Authorization": f"Bearer {FIREWORKS_API_KEY}"},
-                               json={"model": adapter_model_id, "messages": [{"role": "user", "content": prompt}],
-                                     "max_tokens": 128}, timeout=30)
-                r.raise_for_status()
+                r = self._http("POST", url, json={
+                    "model": adapter_model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 128,
+                })
                 answer = r.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                 if any(kw in answer.lower() for kw in ["ax-tree", "weiter", "klicken", "workaround", "element"]):
                     hits += 1
@@ -141,7 +158,8 @@ class FireworksTrainerSOTA:
         if not any(a["id"] == adapter_id for a in data["adapters"]):
             data["adapters"].append({
                 "id": adapter_id, "description": "SOTA LoRA – kontrastives Lernen",
-                "capability": capability, "base_model": self.base_model, "status": "available", "total_calls": 0,
+                "capability": capability, "base_model": self.base_model,
+                "status": "available", "total_calls": 0,
             })
         data["active_adapter"] = adapter_id
         reg_path.parent.mkdir(parents=True, exist_ok=True)

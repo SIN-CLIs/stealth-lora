@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "description": "API Key Rotator für Fireworks AI – Pool-Management mit automatischer Rotation",
+  "tools": [
+    {
+      "name": "rotator-status",
+      "description": "Zeigt Status aller API-Keys im Pool: active, exhausted, empty, failures.",
+      "params": [],
+      "command": ["/Users/jeremy/dev/stealth-lora/key_rotator/opencode_helper.sh", "--status"]
+    },
+    {
+      "name": "rotator-rotate",
+      "description": "Wechselt manuell zum nächsten aktiven Key im Pool.",
+      "params": [],
+      "command": ["/Users/jeremy/dev/stealth-lora/key_rotator/opencode_helper.sh", "--rotate"]
+    },
+    {
+      "name": "rotator-exhaust",
+      "description": "Markiert aktuellen Key als erschöpft (simuliert 10 Rate-Limits). Zum Testen.",
+      "params": [],
+      "command": ["/Users/jeremy/dev/stealth-lora/key_rotator/opencode_helper.sh", "--exhaust"]
+    },
+    {
+      "name": "rotator-current-key",
+      "description": "Gibt aktuell aktiven API-Key aus der Pool-Konfiguration aus.",
+      "params": [],
+      "command": ["/Users/jeremy/dev/stealth-lora/key_rotator/opencode_helper.sh"]
+    },
+    {
+      "name": "lora-train",
+      "description": "Startet LoRA-Training auf Fireworks AI mit aktuellem Pool-Key.",
+      "params": [],
+      "command": ["python3", "-c",
+        "import sys; sys.path.insert(0,'/Users/jeremy/dev/stealth-lora'); from stealth_lora.trainer_sota import FireworksTrainerSOTA; t=FireworksTrainerSOTA(); r=t.run_full_cycle(); print(r if r else 'failed')"]
+    },
+    {
+      "name": "lora-check-training",
+      "description": "Prüft ob genügend Trainingsdaten für LoRA vorliegen (min 10 Workarounds).",
+      "params": [],
+      "command": ["python3", "-c",
+        "import sys; sys.path.insert(0,'/Users/jeremy/dev/stealth-memory'); from stealth_memory.training_decider import decider; import json; print(json.dumps(decider.get_stats(), indent=2))"]
+    }
+  ]
+}
